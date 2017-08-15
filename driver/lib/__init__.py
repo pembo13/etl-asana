@@ -1,10 +1,11 @@
 import attr
+from .errors import *
 from attr.validators import instance_of, optional
 
 @attr.s(frozen=True)
 class RetrieveMetadataResult(object):
     """
-    Result of calling an ETL driver's retrieve_metadata() method.
+    Result of calling a driver's `retrieve_metadata` method.
 
     Constructor must include milestone.
     Fields:
@@ -32,7 +33,7 @@ class RetrieveMetadataResult(object):
 @attr.s(frozen=True)
 class RetrieveDataResult(object):
     """
-    Result of calling an ETL driver's retrieve_data() method.
+    Result of calling a driver's `retrieve_data` method.
 
     Fields:
         milestone - Milestone dictionary including any values needed for future
@@ -58,47 +59,3 @@ class RetrieveDataResult(object):
     docs = attr.ib(default=attr.Factory(list), validator=instance_of(list))
     should_remove_children = attr.ib(default=False, validator=instance_of(bool))
     should_remove_doc = attr.ib(default=False, validator=instance_of(bool))
-
-    def __str__(self):
-        milestone = "milestone={}".format(self.milestone)
-        docs = "docs={}".format(self.docs)
-        remove_children = "should_remove_children={}" \
-            .format(self.should_remove_children)
-        remove_doc = "should_remove_doc={}".format(self.should_remove_doc)
-        data = "data=None" if self.data is None else "data=<obj>"
-        unicode_data = "unicode_data=None" if self.unicode_data is None \
-            else "unicode_data=<unicode>"
-        return u"{}({}, {}, {}, {}, {}, {})".format(
-            type(self).__name__, milestone, docs, remove_children, remove_doc,
-            data, unicode_data
-        )
-
-class AuthRevokedError(RuntimeError):
-    """
-    Raised when ETL task discovers access to datasource has been revoked.
-    """
-    def __init__(self, error=None):
-        super(AuthRevokedError, self).__init__(u"Authorization revoked error",
-                                               error)
-        self.error = error
-
-
-class RateLimitError(RuntimeError):
-    """
-    Raised when a data source indicates a rate limit is being violated.
-    """
-    def __init__(self, error=None, duration_seconds=1800):
-        super(RateLimitError, self).__init__("Rate limit error", error)
-        self.error = error
-        self.duration_seconds = duration_seconds
-
-
-class ServiceUnavailableError(RuntimeError):
-    """
-    Raised when a data source throws an exception indicating diffultities
-    on their end (e.g. HTTP 500 result)
-    """
-    def __init__(self, error=None):
-        super(ServiceUnavailableError, self)\
-            .__init__("Service unavailable error", error)
-        self.error = error
