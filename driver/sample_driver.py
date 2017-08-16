@@ -1,3 +1,5 @@
+import os
+
 from lib import RetrieveMetadataResult, RateLimitError, \
                 RetrieveDataResult
 
@@ -72,5 +74,5 @@ class SampleDriver():
 
         :return `RetrieveDataResult` with the appropriate values populated.
         """
-        f = open("lib/sample_data/"+FILE_REFERENCE[doc['id']], 'r')
+        f = open(os.path.dirname(__file__) + "/lib/sample_data/"+FILE_REFERENCE[doc['id']], 'r')
         return RetrieveDataResult(data=f.read())
