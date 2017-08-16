@@ -23,4 +23,4 @@ The sample driver was built with several stages of the ETL process in mind. You 
     specified has passed. You can manually remove the `next-sync` key from the milestone to get around this.
 
 
-Majority of your work will be done in a new Driver class. When developing, change out the SampleDriver in `driver/runner.py` with your own. `runner.py` and `driver_wrapper.py` are not set in stone, though any changes made to these files should be discussed before committing to them.
+Majority of your work will be done in a new `Driver` class. When developing, change out the `SampleDriver` in `driver/runner.py` with your own. `runner.py` and `driver_wrapper.py` are not set in stone, though any changes made to these files should be discussed before committing to them.
