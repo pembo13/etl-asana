@@ -37,5 +37,3 @@ h4. Notes
 [https://asana.com/developers/api-reference/tasks]
 
 [https://asana.com/developers/api-reference/attachments]
-
- <Paste>
