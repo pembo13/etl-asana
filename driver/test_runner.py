@@ -8,7 +8,12 @@ BUTTER_USER_ID = 2
 DATASOURCE_USER_ID = "danial@butter.ai"
 
 
-if __name__ == '__main__':
+def test():
     driver = AsanaDriver(BUTTER_USER_ID, DATASOURCE_USER_ID)
-    task = ETLTaskLite(BUTTER_USER_ID, DATASOURCE_USER_ID, driver)
-    task.start()
+    driver.retrieve_metadata(None)
+    return
+
+
+if __name__ == '__main__':
+    test()
+    pass
