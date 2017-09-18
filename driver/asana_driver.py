@@ -7,38 +7,13 @@ import pprint
 import asana
 import dateparser
 import pytz
+import requests
 # local imports
-from lib import RetrieveMetadataResult
+from lib import AuthRevokedError
 from lib import RateLimitError
 from lib import RetrieveDataResult
-
-
-# Some dummy data mimicking a datasource.
-DOCS = [
-    {
-        "id":"butter:sd:external_id_1",
-        "external_id":"external_id_1",
-        "dirty": True,
-    },
-    {
-        "id":"butter:sd:external_id_2",
-        "external_id":"external_id_2",
-        "dirty": True,
-    },
-    {
-        "id":"butter:sd:external_id_3",
-        "external_id":"external_id_3",
-        "dirty": True,
-    },
-]
-
-
-# Associate sample files with the dummy data.
-FILE_REFERENCE = {
-    "butter:sd:external_id_1": "dictionary.pdf",
-    "butter:sd:external_id_2": "invoicesample.pdf",
-    "butter:sd:external_id_3": "somatosensory.pdf",
-}
+from lib import RetrieveMetadataResult
+from lib import ServiceUnavailableError
 
 
 pp = pprint.PrettyPrinter(indent=4)
@@ -60,21 +35,26 @@ class AsanaDriver(object):
         self.datasource_user_id = datasource_user_id
         
         # pull api credentials
-        personal_access_token = os.environ['ASANA_ACCESS_TOKEN']
+        personal_access_token = os.environ['ASANA_ACCESS_TOKEN'] # TODO: handle authentication better
         
         # create api client
         self.client = asana.Client.access_token(personal_access_token)
         
         # pull initial data
-        self.me = self.client.users.me()
-        self.workspaces = self.me['workspaces']
-        self.projects = []
-        for w in self.workspaces:
-            for p in self.client.projects.find_all({ 'workspace': w['id'] }):
-                #p['workspace'] = w
-                self.projects.append(p)
+        try:
+            self.me = self.client.users.me()
+            self.workspaces = self.me['workspaces']
+            self.projects = []
+            for w in self.workspaces:
+                for p in self.client.projects.find_all({ 'workspace': w['id'] }):
+                    #p['workspace'] = w
+                    self.projects.append(p)
+                    pass
                 pass
-            pass
+        except asana.error.NoAuthorizationError, e:
+            raise AuthRevokedError( e.message )
+        except asana.error.RateLimitEnforcedError, e:
+            raise RateLimitError( e.message )
        
         # configure client
         asana.Client.DEFAULTS['page_size'] = 1000
@@ -94,22 +74,6 @@ class AsanaDriver(object):
         
         return
 
-    def list_tasks(self):
-        """
-        Returns a list of all tasks.
-        """
-        
-        items = []
-        
-        for p in self.projects:
-            for t in self.client.tasks.find_all({ 'project': p['id'] }):
-                t['project'] = p
-                print t
-                pass
-            pass
-        
-        return items
-
     def retrieve_data(self, doc):
         """
         Used to download content for a single doc. Typically this involves
@@ -122,8 +86,29 @@ class AsanaDriver(object):
 
         :return `RetrieveDataResult` with the appropriate values populated.
         """
-        f = open(os.path.dirname(__file__) + "/lib/sample_data/"+FILE_REFERENCE[doc['id']], 'r')
-        return RetrieveDataResult(data=f.read())
+        external_id = doc['external_id']
+        subtype = doc.get('subtype')
+        
+        try:
+            if subtype == 'attachment':
+                attachment = self.client.attachments.find_by_id(attachment=external_id)
+                
+                url = attachment['download_url']
+                
+                r = requests.get(url)
+                
+                return RetrieveDataResult(data=r.content) # TODO: check if this okay for potentially large files
+            elif subtype is not None:
+                raise Exception( 'unexpected subtype: ' + repr(s) )
+            else:
+                task = self.client.tasks.find_by_id(task=external_id)
+                
+                return RetrieveDataResult(data=task['notes']) # Note: technically, a this could be empty
+        except asana.error.NotFoundError, e:
+            raise ServiceUnavailableError( e.message ) # TODO: doesn't seem like the best exception to raise
+        except asana.error.RateLimitEnforcedError, e:
+            raise RateLimitError( e.message )
+        return
 
     def retrieve_metadata(self, milestone):
         """
@@ -139,52 +124,62 @@ class AsanaDriver(object):
         :returns `RetrieveMetadataResult` with the appropriate values populated.
         """
         
-        if milestone is None: milestone = { 'step':'stage1' }
+        if milestone is None: milestone = { 'step':'stage1' } # TODO: verify use of milestone
         
         docs = []
         
-        for t in self.iter_tasks():
-            task = self.client.tasks.find_by_id(task=t['id'])
+        try:
+            for t in self.iter_tasks():
+                task = self.client.tasks.find_by_id(task=t['id'])
+                
+                # build document meta for task
+                doc = {
+                    'id' : task['id'], # TODO: verify id to be used
+                    'external_id' : task['id'], # TODO: verify id to be used
+                    'dirty' : True,
+                    'title' : t['name'],
+                    'url': 'https://app.asana.com/0/{project_id}/{task_id}'.format(project_id=t['project']['id'], task_id=t['id']),
+                    'created': parse_date( task['created_at'] ),
+                    'edited': parse_date( task['modified_at'] ),
+                    'tag': map(lambda tag: tag['name'], task['tags']),
+                    'as_assignee': [ task['assignee']['name'] , task['assignee']['id'] ] if task['assignee'] else None,
+                    'as_completed': task['completed'],
+                    'as_completed_date': parse_date( task['completed_at'] ),
+                    'as_hearted': task['hearted'],
+                }
+                docs.append(doc) ; pp.pprint(doc)
+                
+                # get attachments for task
+                attachments = self.client.attachments.find_by_task(task=t['id'])
+                
+                # loop through attachments, and add to document pool
+                for a in attachments:
+                    attachment = self.client.attachments.find_by_id(attachment=a['id'])
+                    
+                     # build document meta for attachment
+                    doc = {
+                        'id' : attachment['id'], # TODO: verify id to be used
+                        'external_id' : attachment['id'], # TODO: verify id to be used
+                        'subtype' : 'attachment',
+                        'title' : attachment['name'],
+                        'url' : attachment['download_url'],
+                        'created': parse_date( attachment['created_at'] ),
+                        'path': [ attachment['parent']['name'] ],
+                        'container_url' : attachment['view_url'],
+                    }
+                    docs.append(doc) ; pp.pprint(doc)
+                    pass
+                pass
+        except asana.error.RateLimitEnforcedError, e:
+            raise RateLimitError( e.message )
             
-            # build document meta
-            doc = {
-                'dirty' : True,
-                'id' : t['id'],
-                'title' : t['name'],
-                'url': 'https://app.asana.com/0/{project_id}/{task_id}'.format(project_id=t['project']['id'], task_id=t['id']),
-                'created': parse_date( task['created_at'] ),
-                'edited': parse_date( task['modified_at'] ),
-                'tag': map(lambda tag: tag['name'], task['tags']),
-                'as_assignee': [ task['assignee']['name'] , task['assignee']['id'] ] if task['assignee'] else None,
-                'as_completed': task['completed'],
-                'as_completed_date': parse_date( task['completed_at'] ),
-                'as_hearted': task['hearted'],
-            }
-            #pp.pprint(doc)
-            docs.append(doc)
-            pass
-        
+        # build result object
         result = RetrieveMetadataResult(
             milestone=milestone,
             retrieve_metadata_done=True,
             docs=docs
         )
         
-        return result
-
-        if not milestone:
-            milestone['step'] = 'stage1'
-            result = RetrieveMetadataResult(milestone=milestone,
-                                            retrieve_metadata_done=True,
-                                            docs=DOCS)
-        elif milestone.get('step') == 'stage1':
-            result = RetrieveMetadataResult(milestone=milestone,
-                                            retrieve_metadata_done=True,
-                                            doc_ids_to_remove=['external_id_2'])
-            milestone['step'] = 'stage2'
-        elif milestone.get('step') == 'stage2':
-            raise RateLimitError(duration_seconds=7200) #delay next sync for 2 hours
-
         return result
 
     pass
