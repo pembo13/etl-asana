@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # stdlib imports
+import datetime
 import os
 import pprint
 # third-party imports
@@ -18,12 +19,32 @@ from lib import ServiceUnavailableError
 
 pp = pprint.PrettyPrinter(indent=4)
 
+"""
+1. research what happens when a task/attachment is deleted: [DONE] 404
+2. implement setup/teardown method for driver, handle auth there: [DONE]
+3. switch to auth2
+4. use pagination hash in milestone [ NO ] offset hash not exposed to client lib
+5. use modified_since [DONE]
+"""
 
 def parse_date(s):
     if not s: return None
+    if isinstance(s, datetime.date): return s
+    if isinstance(s, datetime.datetime): return s.date()
     
     dt = dateparser.parse(s)
-    dt = pytz.utc.normalize(dt.astimezone(pytz.utc))
+    
+    return dt.date()
+
+def parse_datetime(s):
+    if not s: return None
+    if isinstance(s, datetime.datetime): return s
+    
+    dt = dateparser.parse(s)
+    if dt.tzinfo:
+        dt = pytz.utc.normalize(dt.astimezone(pytz.utc))
+    else:
+        dt = pytz.utc.localize(dt)
     
     return dt
 
@@ -34,39 +55,32 @@ class AsanaDriver(object):
         self.butter_user_id = butter_user_id
         self.datasource_user_id = datasource_user_id
         
-        # pull api credentials
-        personal_access_token = os.environ['ASANA_ACCESS_TOKEN'] # TODO: handle authentication better
-        
-        # create api client
-        self.client = asana.Client.access_token(personal_access_token)
-        
-        # pull initial data
-        try:
-            self.me = self.client.users.me()
-            self.workspaces = self.me['workspaces']
-            self.projects = []
-            for w in self.workspaces:
-                for p in self.client.projects.find_all({ 'workspace': w['id'] }):
-                    #p['workspace'] = w
-                    self.projects.append(p)
-                    pass
-                pass
-        except asana.error.NoAuthorizationError, e:
-            raise AuthRevokedError( e.message )
-        except asana.error.RateLimitEnforcedError, e:
-            raise RateLimitError( e.message )
-       
-        # configure client
-        asana.Client.DEFAULTS['page_size'] = 1000
+        # initialize some fields
+        self.client = None
+        self.me = None
+        self.workspaces = None
+        self.projects = None
+        return
+    
+    def __enter__(self):
+        self.setup()
+        return self
+    
+    def __exit__(self, type, value, traceback):
+        self.teardown()
         return
 
-    def iter_tasks(self):
+    def iter_tasks(self, modified_since=None):
         """
         Returns a list of all tasks.
         """
+        params = {}
+        if modified_since is not None: params['modified_since'] = modified_since.isoformat()
         
         for p in self.projects:
-            for t in self.client.tasks.find_all({ 'project': p['id'] }):
+            params['project'] = p['id']
+            
+            for t in self.client.tasks.find_all(params):
                 t['project'] = p
                 yield t
                 pass
@@ -124,28 +138,34 @@ class AsanaDriver(object):
         :returns `RetrieveMetadataResult` with the appropriate values populated.
         """
         
-        if milestone is None: milestone = { 'step':'stage1' } # TODO: verify use of milestone
+        if milestone is None: milestone = {  }
         
+        modified_since = milestone.get('lastrun')
+        modified_since = parse_datetime(modified_since)
+        print 'modified_since', modified_since
         docs = []
         
         try:
-            for t in self.iter_tasks():
+            for t in self.iter_tasks(modified_since=modified_since):
                 task = self.client.tasks.find_by_id(task=t['id'])
                 
                 # build document meta for task
                 doc = {
-                    'id' : task['id'], # TODO: verify id to be used
-                    'external_id' : task['id'], # TODO: verify id to be used
-                    'dirty' : True,
-                    'title' : t['name'],
+                    'external_id' : task['id'],
+                    
+                    'title' : task['name'],
+                    'content' : task['notes'], # TODO: verify asana.png
                     'url': 'https://app.asana.com/0/{project_id}/{task_id}'.format(project_id=t['project']['id'], task_id=t['id']),
-                    'created': parse_date( task['created_at'] ),
-                    'edited': parse_date( task['modified_at'] ),
+                    'path': map(lambda p: p['name'], task['projects']),
+                    'created': parse_datetime( task['created_at'] ),
+                    'edited': parse_datetime( task['modified_at'] ),
                     'tag': map(lambda tag: tag['name'], task['tags']),
                     'as_assignee': [ task['assignee']['name'] , task['assignee']['id'] ] if task['assignee'] else None,
                     'as_completed': task['completed'],
-                    'as_completed_date': parse_date( task['completed_at'] ),
+                    'as_completed_date': parse_datetime( task['completed_at'] ),
+                    'as_due_date': parse_datetime( task['due_at'] or task['due_on'] or None ),
                     'as_hearted': task['hearted'],
+                    'parent_name' : task['parent']['name'] if task['parent'] else None,
                 }
                 docs.append(doc) ; pp.pprint(doc)
                 
@@ -158,18 +178,22 @@ class AsanaDriver(object):
                     
                      # build document meta for attachment
                     doc = {
-                        'id' : attachment['id'], # TODO: verify id to be used
-                        'external_id' : attachment['id'], # TODO: verify id to be used
+                        'external_id' : attachment['id'],
                         'subtype' : 'attachment',
+                        
                         'title' : attachment['name'],
-                        'url' : attachment['download_url'],
-                        'created': parse_date( attachment['created_at'] ),
+                        'created': parse_datetime( attachment['created_at'] ),
                         'path': [ attachment['parent']['name'] ],
-                        'container_url' : attachment['view_url'],
+                        'container_url' : None, # TODO: get clarification
+                        'parent_name' : attachment['parent']['name'], # TODO: get clarification
                     }
                     docs.append(doc) ; pp.pprint(doc)
                     pass
                 pass
+            
+            # update milestone
+            milestone['lastrun'] = datetime.datetime.utcnow()
+            pass
         except asana.error.RateLimitEnforcedError, e:
             raise RateLimitError( e.message )
             
@@ -181,5 +205,41 @@ class AsanaDriver(object):
         )
         
         return result
+
+    def setup(self):
+        """
+        Creates connection to Asasna API, and pulls initial data.
+        """
+        
+        if self.client is not None: return
+        
+        # pull api credentials
+        personal_access_token = os.environ['ASANA_ACCESS_TOKEN'] # TODO: handle authentication better
+        
+        # create api client
+        self.client = asana.Client.access_token(personal_access_token)
+        
+        # pull initial data
+        try:
+            self.me = self.client.users.me()
+            self.workspaces = self.me['workspaces']
+            self.projects = []
+            for w in self.workspaces:
+                for p in self.client.projects.find_all({ 'workspace': w['id'] }):
+                    #p['workspace'] = w
+                    self.projects.append(p)
+                    pass
+                pass
+        except asana.error.NoAuthorizationError, e:
+            raise AuthRevokedError( e.message )
+        except asana.error.RateLimitEnforcedError, e:
+            raise RateLimitError( e.message )
+       
+        # configure client
+        asana.Client.DEFAULTS['page_size'] = 1000
+        return
+
+    def teardown(self):
+        return
 
     pass
