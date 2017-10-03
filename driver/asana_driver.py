@@ -51,9 +51,8 @@ def parse_datetime(s):
 
 class AsanaDriver(object):
 
-    def __init__(self, butter_user_id, datasource_user_id):
-        self.butter_user_id = butter_user_id
-        self.datasource_user_id = datasource_user_id
+    def __init__(self, personal_access_token):
+        self.personal_access_token = personal_access_token
         
         # initialize some fields
         self.client = None
@@ -65,7 +64,7 @@ class AsanaDriver(object):
     def __enter__(self):
         self.setup()
         return self
-    
+
     def __exit__(self, type, value, traceback):
         self.teardown()
         return
@@ -115,6 +114,7 @@ class AsanaDriver(object):
             elif subtype is not None:
                 raise Exception( 'unexpected subtype: ' + repr(s) )
             else:
+				# TODO: not needed for notes
                 task = self.client.tasks.find_by_id(task=external_id)
                 
                 return RetrieveDataResult(data=task['notes']) # Note: technically, a this could be empty
@@ -142,7 +142,7 @@ class AsanaDriver(object):
         
         modified_since = milestone.get('lastrun')
         modified_since = parse_datetime(modified_since)
-        print 'modified_since', modified_since
+
         docs = []
         
         try:
@@ -173,6 +173,7 @@ class AsanaDriver(object):
                 attachments = self.client.attachments.find_by_task(task=t['id'])
                 
                 # loop through attachments, and add to document pool
+				# TODO: respect last_modified on attachments
                 for a in attachments:
                     attachment = self.client.attachments.find_by_id(attachment=a['id'])
                     
@@ -213,11 +214,8 @@ class AsanaDriver(object):
         
         if self.client is not None: return
         
-        # pull api credentials
-        personal_access_token = os.environ['ASANA_ACCESS_TOKEN'] # TODO: handle authentication better
-        
         # create api client
-        self.client = asana.Client.access_token(personal_access_token)
+        self.client = asana.Client.access_token(self.personal_access_token)
         
         # pull initial data
         try:
