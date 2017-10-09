@@ -4,7 +4,6 @@
 from collections import deque
 import datetime
 import os
-import pprint
 import tempfile
 import time
 # third-party imports
@@ -20,28 +19,37 @@ from lib import RetrieveMetadataResult
 from lib import ServiceUnavailableError
 
 
-pp = pprint.PrettyPrinter(indent=4)
-
-
 def parse_date(s):
-    if not s: return None
-    if isinstance(s, datetime.date): return s
-    if isinstance(s, datetime.datetime): return s.date()
+    if not s:
+        return None
+
+    if isinstance(s, datetime.datetime):
+        return s.date()
+
+    if isinstance(s, datetime.date):
+        return s
     
     dt = dateparser.parse(s)
     
     return dt.date()
 
 def parse_datetime(s):
-    if not s: return None
-    if isinstance(s, datetime.datetime): return s
-    
-    dt = dateparser.parse(s)
+    if not s:
+        return None
+
+    if isinstance(s, datetime.datetime) and s.tzinfo:
+        return s
+
+    if isinstance(s, datetime.datetime):
+        dt = s
+    else:
+        dt = dateparser.parse(s)
+
     if dt.tzinfo:
         dt = pytz.utc.normalize(dt.astimezone(pytz.utc))
     else:
         dt = pytz.utc.localize(dt)
-    
+
     return dt
 
 
@@ -80,7 +88,7 @@ class OneDriveDriver(object):
         self.teardown()
         return
 
-    def iter_files(self, modified_since=None):
+    def _iter_files(self, modified_since=None):
         """
         Returns a list of all files.
         
@@ -146,18 +154,28 @@ class OneDriveDriver(object):
         external_id = doc['external_id']
         subtype = doc.get('subtype', 'file')
         
-        if subtype == 'file':
-            fd,path = tempfile.mkstemp()
-            os.close(fd)
+        try:
+            if subtype == 'file':
+                fd,path = tempfile.mkstemp()
+                os.close(fd)
+                
+                self.client.item(drive='me', id=external_id).download(path)
+                
+                try:
+                    with open(path, 'rb') as fin:
+                        return RetrieveDataResult(data=fin.read())
+                finally:
+                    if os.path.isfile(path):
+                        os.remove(path)
+        except onedrivesdk.error.OneDriveError, e:
+            if e.code == onedrivesdk.error.ErrorCode.AccessDenied:
+                raise AuthRevokedError( e.message )
+            if e.code == onedrivesdk.error.ErrorCode.ActivityLimitReached:
+                raise RateLimitError( e.message )
+            if e.code == onedrivesdk.error.ErrorCode.Unauthenticated:
+                raise AuthRevokedError( e.message )
             
-            self.client.item(drive='me', id=external_id).download(path)
-            
-            try:
-                with open(path, 'rb') as fin:
-                    return RetrieveDataResult(data=fin.read())
-            finally:
-                if os.path.isfile(path):
-                    os.remove(path)
+            raise
         
         return
 
@@ -175,40 +193,51 @@ class OneDriveDriver(object):
         :returns `RetrieveMetadataResult` with the appropriate values populated.
         """
         
-        if milestone is None: milestone = {  }
-        
         modified_since = milestone.get('lastrun')
         modified_since = parse_datetime(modified_since)
         
         docs = []
         
-        for item in self.iter_files(modified_since=modified_since):
-            # build document meta for task
-            path = filter(None, item.parent_reference.path.replace(u'/drive/root:', u'').split(u'/'))
-            
-            doc = {
-                'external_id' : item.id,
+        try:
+            for item in self._iter_files(modified_since=modified_since):
+                item_created = parse_datetime(item.created_date_time)
+                # build document meta for task
+                path = filter(None, item.parent_reference.path.replace(u'/drive/root:', u'').split(u'/'))
                 
-                'title' : item.name,
-                'content' : item.description or '',
-                'url': item.web_url,
-                'path': path,
-                'created': item.created_date_time,
-                'edited': item.last_modified_date_time,
-                'parent_name' : path[-1] if path else '',
-            }
-            docs.append(doc) ; pp.pprint(doc)
-            pass
-        
-        # update milestone
-        milestone['lastrun'] = datetime.datetime.utcnow()
+                if modified_since and item_created < modified_since:
+                    continue
+                
+                doc = {
+                    'external_id' : item.id,
+                    'dirty': True,
+                    
+                    'title' : item.name,
+                    'content' : item.description or '',
+                    'url': item.web_url,
+                    'path': path,
+                    'created': item.created_date_time,
+                    'edited': item.last_modified_date_time,
+                    'parent_name' : path[-1] if path else '',
+                }
+                docs.append(doc)
+                pass
             
-        # build result object
-        result = RetrieveMetadataResult(
-            milestone=milestone,
-            retrieve_metadata_done=True,
-            docs=docs
-        )
+            # update milestone
+            milestone['lastrun'] = datetime.datetime.utcnow()
+                
+            # build result object
+            result = RetrieveMetadataResult(
+                milestone=milestone,
+                retrieve_metadata_done=True,
+                docs=docs
+            )
+        except onedrivesdk.error.OneDriveError, e:
+            if e.code == onedrivesdk.error.ErrorCode.AccessDenied:
+                raise AuthRevokedError( e.message )
+            if e.code == onedrivesdk.error.ErrorCode.ActivityLimitReached:
+                raise RateLimitError( e.message )
+            if e.code == onedrivesdk.error.ErrorCode.Unauthenticated:
+                raise AuthRevokedError( e.message )
         
         return result
 

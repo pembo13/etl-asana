@@ -1,7 +1,8 @@
 # stdlib imports
-from collections import deque
+import datetime
 import json
 import os
+import pprint
 import sys
 import time
 import urlparse
@@ -14,6 +15,9 @@ from driver.onedrive_driver import OneDriveDriver
 API_BASE_URL = 'https://api.onedrive.com/v1.0/'
 REDIRECT_URL = 'https://pembo13.net/'
 SCOPES = ['wl.signin', 'wl.offline_access', 'onedrive.readwrite']
+
+
+pp = pprint.PrettyPrinter(indent=4)
 
 
 class OneDriveCredentials(onedrivesdk.session.Session):
@@ -142,9 +146,19 @@ def test():
         sys.exit(0)
     
     with OneDriveDriver(**credentials) as driver:
-        #driver.retrieve_metadata(None)
-        #driver.retrieve_metadata({ 'lastrun': datetime.datetime.utcnow() - datetime.timedelta(days=1) })
-        print 'File', driver.retrieve_data({ 'external_id': '7794AF724FC1B738!102' })
+        print 'All:'
+        results = driver.retrieve_metadata({})
+        for doc in results.docs:
+            pp.pprint(doc)
+        
+        print 'Last Run:'
+        results = driver.retrieve_metadata({ 'lastrun': datetime.datetime.utcnow() - datetime.timedelta(days=30) })
+        for doc in results.docs:
+            pp.pprint(doc)
+            
+        print 'File:',
+        result = driver.retrieve_data({ 'external_id': '7794AF724FC1B738!102' })
+        print len(result.data), 'bytes'
         pass
     return
 

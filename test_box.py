@@ -1,7 +1,8 @@
 # stdlib imports
-from collections import deque
+import datetime
 import json
 import os
+import pprint
 import sys
 import urlparse
 # third-party imports
@@ -11,6 +12,9 @@ from driver.box_driver import BoxDriver
 
 
 REDIRECT_URL = 'https://pembo13.net/'
+
+
+pp = pprint.PrettyPrinter(indent=4)
 
 
 def authenticate(filename='box.credentials', oauth_class=boxsdk.OAuth2, return_credentials=False):
@@ -87,9 +91,19 @@ def test():
         access_token=credentials.get('access_token'),
         refresh_token=credentials.get('refresh_token')
     ) as driver:
-        #driver.retrieve_metadata(None)
-        #driver.retrieve_metadata({ 'lastrun': datetime.datetime.utcnow() - datetime.timedelta(days=1) })
-        print 'File', driver.retrieve_data({ 'external_id': 232814289172 })
+        print 'All:'
+        results = driver.retrieve_metadata({})
+        for doc in results.docs:
+            pp.pprint(doc)
+        
+        print 'Last Run:'
+        results = driver.retrieve_metadata({ 'lastrun': datetime.datetime.utcnow() - datetime.timedelta(days=30) })
+        for doc in results.docs:
+            pp.pprint(doc)
+            
+        print 'File:',
+        result = driver.retrieve_data({ 'external_id': 232814289172 })
+        print len(result.data), 'bytes'
         pass
     return
 

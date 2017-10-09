@@ -3,7 +3,6 @@
 # stdlib imports
 import datetime
 import os
-import pprint
 # third-party imports
 import asana
 import dateparser
@@ -17,35 +16,37 @@ from lib import RetrieveMetadataResult
 from lib import ServiceUnavailableError
 
 
-pp = pprint.PrettyPrinter(indent=4)
-
-"""
-1. research what happens when a task/attachment is deleted: [DONE] 404
-2. implement setup/teardown method for driver, handle auth there: [DONE]
-3. switch to auth2
-4. use pagination hash in milestone [ NO ] offset hash not exposed to client lib
-5. use modified_since [DONE]
-"""
-
 def parse_date(s):
-    if not s: return None
-    if isinstance(s, datetime.date): return s
-    if isinstance(s, datetime.datetime): return s.date()
+    if not s:
+        return None
+
+    if isinstance(s, datetime.datetime):
+        return s.date()
+
+    if isinstance(s, datetime.date):
+        return s
     
     dt = dateparser.parse(s)
     
     return dt.date()
 
 def parse_datetime(s):
-    if not s: return None
-    if isinstance(s, datetime.datetime): return s
-    
-    dt = dateparser.parse(s)
+    if not s:
+        return None
+
+    if isinstance(s, datetime.datetime) and s.tzinfo:
+        return s
+
+    if isinstance(s, datetime.datetime):
+        dt = s
+    else:
+        dt = dateparser.parse(s)
+
     if dt.tzinfo:
         dt = pytz.utc.normalize(dt.astimezone(pytz.utc))
     else:
         dt = pytz.utc.localize(dt)
-    
+
     return dt
 
 
@@ -69,7 +70,7 @@ class AsanaDriver(object):
         self.teardown()
         return
 
-    def iter_tasks(self, modified_since=None):
+    def _iter_tasks(self, modified_since=None):
         """
         Returns a list of all tasks.
         """
@@ -110,16 +111,11 @@ class AsanaDriver(object):
                 
                 r = requests.get(url)
                 
-                return RetrieveDataResult(data=r.content) # TODO: check if this okay for potentially large files
-            elif subtype is not None:
-                raise Exception( 'unexpected subtype: ' + repr(s) )
+                return RetrieveDataResult(data=r.content)
             else:
-				# TODO: not needed for notes
-                task = self.client.tasks.find_by_id(task=external_id)
-                
-                return RetrieveDataResult(data=task['notes']) # Note: technically, a this could be empty
+                raise Exception( 'unexpected subtype: ' + repr(s) )
         except asana.error.NotFoundError, e:
-            raise ServiceUnavailableError( e.message ) # TODO: doesn't seem like the best exception to raise
+            raise ServiceUnavailableError( e.message )
         except asana.error.RateLimitEnforcedError, e:
             raise RateLimitError( e.message )
         return
@@ -137,58 +133,64 @@ class AsanaDriver(object):
 
         :returns `RetrieveMetadataResult` with the appropriate values populated.
         """
-        
-        if milestone is None: milestone = {  }
-        
         modified_since = milestone.get('lastrun')
         modified_since = parse_datetime(modified_since)
 
         docs = []
         
         try:
-            for t in self.iter_tasks(modified_since=modified_since):
+            for t in self._iter_tasks(modified_since=modified_since):
                 task = self.client.tasks.find_by_id(task=t['id'])
+                task_created = parse_datetime( task['created_at'] )
+                task_modified = parse_datetime( task['modified_at'] )
                 
-                # build document meta for task
-                doc = {
-                    'external_id' : task['id'],
-                    
-                    'title' : task['name'],
-                    'content' : task['notes'], # TODO: verify asana.png
-                    'url': 'https://app.asana.com/0/{project_id}/{task_id}'.format(project_id=t['project']['id'], task_id=t['id']),
-                    'path': map(lambda p: p['name'], task['projects']),
-                    'created': parse_datetime( task['created_at'] ),
-                    'edited': parse_datetime( task['modified_at'] ),
-                    'tag': map(lambda tag: tag['name'], task['tags']),
-                    'as_assignee': [ task['assignee']['name'] , task['assignee']['id'] ] if task['assignee'] else None,
-                    'as_completed': task['completed'],
-                    'as_completed_date': parse_datetime( task['completed_at'] ),
-                    'as_due_date': parse_datetime( task['due_at'] or task['due_on'] or None ),
-                    'as_hearted': task['hearted'],
-                    'parent_name' : task['parent']['name'] if task['parent'] else None,
-                }
-                docs.append(doc) ; pp.pprint(doc)
+                if modified_since is None or task_modified >= modified_since:
+                    # build document meta for task
+                    doc = {
+                        'external_id' : task['id'],
+                        'dirty': False,
+                        
+                        'title' : task['name'],
+                        'content' : task['notes'],
+                        'url': 'https://app.asana.com/0/{project_id}/{task_id}'.format(project_id=t['project']['id'], task_id=t['id']),
+                        'path': map(lambda p: p['name'], task['projects']),
+                        'created': task_created,
+                        'edited': task_modified,
+                        'tag': map(lambda tag: tag['name'], task['tags']),
+                        'as_assignee': [ task['assignee']['name'] , task['assignee']['id'] ] if task['assignee'] else None,
+                        'as_completed': task['completed'],
+                        'as_completed_date': parse_datetime( task['completed_at'] ),
+                        'as_due_date': parse_datetime( task['due_at'] or task['due_on'] or None ),
+                        'as_hearted': task['hearted'],
+                        'parent_name' : task['parent']['name'] if task['parent'] else None,
+                    }
+                    docs.append(doc)
+                    pass
                 
                 # get attachments for task
                 attachments = self.client.attachments.find_by_task(task=t['id'])
                 
                 # loop through attachments, and add to document pool
-				# TODO: respect last_modified on attachments
                 for a in attachments:
                     attachment = self.client.attachments.find_by_id(attachment=a['id'])
+                    attachment_created = parse_datetime( attachment['created_at'] )
+                    
+                    if modified_since and attachment_created < modified_since:
+                        continue
                     
                      # build document meta for attachment
                     doc = {
                         'external_id' : attachment['id'],
                         'subtype' : 'attachment',
+                        'dirty': True,
                         
                         'title' : attachment['name'],
-                        'created': parse_datetime( attachment['created_at'] ),
+                        'created': attachment_created,
                         'path': [ attachment['parent']['name'] ],
-                        'container_url' : None, # TODO: get clarification
-                        'parent_name' : attachment['parent']['name'], # TODO: get clarification
+                        'container_url' : None,
+                        'parent_name' : attachment['parent']['name'],
                     }
-                    docs.append(doc) ; pp.pprint(doc)
+                    docs.append(doc)
                     pass
                 pass
             
