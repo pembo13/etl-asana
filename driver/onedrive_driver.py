@@ -28,9 +28,9 @@ def parse_date(s):
 
     if isinstance(s, datetime.date):
         return s
-    
+
     dt = dateparser.parse(s)
-    
+
     return dt.date()
 
 def parse_datetime(s):
@@ -58,7 +58,7 @@ class OneDriveSession(onedrivesdk.session.Session):
     @staticmethod
     def load_session(**load_session_kwargs):
         session = load_session_kwargs.pop('session')
-        
+
         return session
 
     def save_session(self, **save_session_kwargs):
@@ -71,72 +71,21 @@ class OneDriveDriver(object):
     API_BASE_URL = 'https://api.onedrive.com/v1.0/'
     REDIRECT_URL = 'https://pembo13.net/'
     SCOPES = ['wl.signin', 'wl.offline_access', 'onedrive.readwrite']
-    
+
     def __init__(self, **credentials):
         self.credentials = credentials
-        
+
         # initialize some fields
         self.client = None
         self.oauth = None
         return
-    
+
     def __enter__(self):
         self.setup()
         return self
-    
+
     def __exit__(self, type, value, traceback):
         self.teardown()
-        return
-
-    def _iter_files(self, modified_since=None):
-        """
-        Returns a list of all files.
-        
-        See: https://github.com/box/box-python-sdk/blob/1.5/boxsdk/object/file.py
-        """
-        
-        queue = deque([
-            ('root', [])
-        ])
-        
-        fields = [
-            'type',
-            'id',
-            'name',
-            'description',
-            'path_collection',
-            'created_at',
-            'modified_at',
-            'tags',
-            'parent',
-        ]
-        
-        while len(queue) > 0:
-            folder_id, parent_path = queue.popleft()
-            
-            collection_left = True
-            limit = 100
-            
-            while collection_left:
-                collection = self.client.item(drive='me', id=folder_id).children.request(top=limit).get()
-                collection_left = len(collection) >= limit
-                
-                for item in collection:
-                    file = item.file
-                    folder = item.folder
-                    
-                    if folder is not None:
-                        queue.append(( item.id , parent_path+[item.id] ))
-                    elif file is not None:
-                        yield item
-                    pass
-                
-                if collection_left:
-                    collection = onedrivesdk.ChildrenCollectionRequest.get_next_page_request(collection, self.client).get()
-                    pass
-                pass
-            pass
-        
         return
 
     def retrieve_data(self, doc):
@@ -153,14 +102,14 @@ class OneDriveDriver(object):
         """
         external_id = doc['external_id']
         subtype = doc.get('subtype', 'file')
-        
+
         try:
             if subtype == 'file':
                 fd,path = tempfile.mkstemp()
                 os.close(fd)
-                
+
                 self.client.item(drive='me', id=external_id).download(path)
-                
+
                 try:
                     with open(path, 'rb') as fin:
                         return RetrieveDataResult(data=fin.read())
@@ -174,9 +123,9 @@ class OneDriveDriver(object):
                 raise RateLimitError( e.message )
             if e.code == onedrivesdk.error.ErrorCode.Unauthenticated:
                 raise AuthRevokedError( e.message )
-            
+
             raise
-        
+
         return
 
     def retrieve_metadata(self, milestone):
@@ -192,39 +141,46 @@ class OneDriveDriver(object):
 
         :returns `RetrieveMetadataResult` with the appropriate values populated.
         """
-        
-        modified_since = milestone.get('lastrun')
-        modified_since = parse_datetime(modified_since)
-        
         docs = []
-        
+
         try:
-            for item in self._iter_files(modified_since=modified_since):
-                item_created = parse_datetime(item.created_date_time)
-                # build document meta for task
-                path = filter(None, item.parent_reference.path.replace(u'/drive/root:', u'').split(u'/'))
-                
-                if modified_since and item_created < modified_since:
-                    continue
-                
-                doc = {
-                    'external_id' : item.id,
-                    'dirty': True,
-                    
-                    'title' : item.name,
-                    'content' : item.description or '',
-                    'url': item.web_url,
-                    'path': path,
-                    'created': item.created_date_time,
-                    'edited': item.last_modified_date_time,
-                    'parent_name' : path[-1] if path else '',
-                }
-                docs.append(doc)
+            # get delta token
+            token = milestone.get('token')
+
+            collection_page_empty = False
+            while not collection_page_empty:
+                collection_page = self.client.item(drive='me', id='root').delta(token=token).get()
+
+                collection_page_empty = len(collection_page) == 0
+                token = collection_page.token
+
+                for item in collection_page:
+                    # build document meta for task
+                    path = filter(None, item.parent_reference.path.replace(u'/drive/root:', u'').split(u'/'))
+
+                    # only care about files
+                    if item.file is None:
+                        continue
+
+                    doc = {
+                        'external_id' : item.id,
+                        'dirty': True,
+
+                        'title' : item.name,
+                        'content' : item.description or '',
+                        'url': item.web_url,
+                        'path': path,
+                        'created': item.created_date_time,
+                        'edited': item.last_modified_date_time,
+                        'parent_name' : path[-1] if path else '',
+                    }
+                    docs.append(doc)
+                    pass
                 pass
-            
+
             # update milestone
-            milestone['lastrun'] = datetime.datetime.utcnow()
-                
+            milestone['token'] = token
+
             # build result object
             result = RetrieveMetadataResult(
                 milestone=milestone,
@@ -238,16 +194,16 @@ class OneDriveDriver(object):
                 raise RateLimitError( e.message )
             if e.code == onedrivesdk.error.ErrorCode.Unauthenticated:
                 raise AuthRevokedError( e.message )
-        
+
         return result
 
     def setup(self):
         """
         Creates connection to Asasna API, and pulls initial data.
         """
-        
+
         if self.client is not None: return
-        
+
         expires = self.credentials.get('expires')
         if expires:
             expires = int(expires)
@@ -256,7 +212,7 @@ class OneDriveDriver(object):
         else:
             expires_in = 0
             pass
-        
+
         # pull credentials
         session = onedrivesdk.session.Session(
             token_type=self.credentials.get('token_type'),
@@ -269,7 +225,7 @@ class OneDriveDriver(object):
             refresh_token=self.credentials.get('refresh_token'),
             client_secret=self.credentials.get('client_secret')
         )
-        
+
         http_provider = onedrivesdk.HttpProvider()
         self.oauth = onedrivesdk.AuthProvider(
             http_provider=http_provider,
@@ -279,7 +235,7 @@ class OneDriveDriver(object):
         )
         self.oauth.load_session(session=session)
         self.oauth.refresh_token()
-        
+
         # create api client
         self.client = onedrivesdk.OneDriveClient(OneDriveDriver.API_BASE_URL, self.oauth, self.oauth._http_provider)
         return
